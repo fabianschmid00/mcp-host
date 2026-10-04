@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1" # weekly: re-scan pinned images for new CVEs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks (full history)
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro"
+          -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo
+          "$GITLEAKS_IMAGE" git /repo --redact --verbose --exit-code 1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -S warning mcp gateway/entrypoint.sh host/bootstrap-guest.sh
+
+  stack:
+    # Brings up gateway + the real gmx image with dummy credentials (no IMAP
+    # login happens) and checks routing, auth and container hardening.
+    runs-on: ubuntu-latest
+    env:
+      MCP_SECRETS_DIR: /tmp/mcp-secrets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: dummy secrets
+        run: |
+          ./mcp init
+          sed -i 's/^TUNNEL_TOKEN=$/TUNNEL_TOKEN=ci-dummy/' "$MCP_SECRETS_DIR/tunnel.env"
+          sed -i 's/^MCP_EMAIL_SERVER_PASSWORD=$/MCP_EMAIL_SERVER_PASSWORD=ci-dummy/' "$MCP_SECRETS_DIR/gmx.env"
+      - name: check
+        run: ./mcp check
+      - name: gateway fails closed
+        run: |
+          docker compose -f compose.yaml build gateway
+          for env in "GMX_UPSTREAM_TOKEN=" "GMX_UPSTREAM_TOKEN=short"; do
+            if docker run --rm -v "$PWD/servers:/etc/caddy/servers:ro" -e "$env" mcp-host/gateway:local; then
+              echo "gateway started with $env" >&2; exit 1
+            fi
+          done
+      - name: up (without cloudflared)
+        run: ./mcp dc up -d --build --wait gateway gmx
+      - name: verify
+        run: ./mcp verify
+      - name: inspect
+        run: ./mcp inspect
+      - name: add/remove round trip
+        run: |
+          ./mcp add citest --image "$(sed -nE 's/^ +image: (ghcr.io\/wh1isper.*)/\1/p' servers/gmx/compose.yaml)" --port 9557 > /dev/null
+          test -f servers/citest/compose.yaml && test -f servers/citest/route.caddy
+          ./mcp remove citest --yes
+          test ! -e servers/citest
+          if grep -q CITEST_ "$MCP_SECRETS_DIR/gateway.env"; then echo "token left behind" >&2; exit 1; fi
+          ./mcp verify
+      - name: logs on failure
+        if: failure()
+        run: ./mcp dc logs --no-color | grep -v -E '[0-9a-f]{64}'
+
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: trivy (fails on fixable CRITICAL)
+        run: ./mcp scan
