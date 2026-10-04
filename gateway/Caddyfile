@@ -1,0 +1,68 @@
+# Auth gateway. The only thing cloudflared talks to.
+#
+# Every MCP server gets one site block in servers/<name>/route.caddy that
+# imports the mcp_route snippet below with its own token and upstream:
+#
+#   http://<hostname>:8080 {
+#       import mcp_route {$<NAME>_UPSTREAM_TOKEN} <service>:<port>
+#   }
+#
+# The entrypoint refuses to start if a route does not use mcp_route or if its
+# token variable is missing / not a 64-char hex string.
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
+
+(mcp_route) {
+	# Access log without any headers (Authorization, Cf-Access-*, cookies).
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				resp_headers delete
+			}
+		}
+	}
+
+	# `route` keeps the directives in the order written: auth first.
+	route {
+		request_body {
+			max_size 1MB
+		}
+
+		@unauthorized not header Authorization "Bearer {args[0]}"
+		respond @unauthorized 401
+
+		# /mcp and /mcp/ are served identically. The upstream (Starlette)
+		# would 307-redirect /mcp/ to http://…/mcp, so rewrite internally.
+		@mcp path /mcp /mcp/
+		rewrite @mcp /mcp
+		reverse_proxy @mcp {args[1]} {
+			header_up -Authorization
+			header_up -Cf-Access-Client-Id
+			header_up -Cf-Access-Client-Secret
+			header_up -Cf-Access-Jwt-Assertion
+			# Stream SSE responses immediately.
+			flush_interval -1
+		}
+
+		respond 404
+	}
+}
+
+# Catch-all: unknown hosts get 404; /healthz for the container healthcheck.
+http://:8080 {
+	respond /healthz 200
+	respond 404
+}
+
+import /etc/caddy/servers/*/route.caddy
