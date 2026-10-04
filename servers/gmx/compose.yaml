@@ -71,6 +71,8 @@ networks:
   # gateway <-> gmx. No egress.
   gmx-backend:
     internal: true
-  # gmx -> imap.gmx.net:993. Only gmx joins it. See SECURITY.md for optional
-  # port filtering via the DOCKER-USER chain.
-  gmx-egress: {}
+  # gmx -> imap.gmx.net:993. Only gmx joins it. The fixed bridge name lets the
+  # optional DOCKER-USER rules in SECURITY.md restrict it to port 993 + DNS.
+  gmx-egress:
+    driver_opts:
+      com.docker.network.bridge.name: mcp-gmx-egress
