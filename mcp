@@ -454,18 +454,30 @@ cmd_update() {
 	done
 }
 
+run_trivy() {
+	if type -P trivy >/dev/null; then
+		trivy "$@"
+	else
+		docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
+			-v mcp-host-trivy-cache:/root/.cache/trivy "$TRIVY_IMAGE" "$@"
+	fi
+}
+
+# Reports HIGH+CRITICAL; fails only on CRITICAL with a fix available.
 cmd_scan() {
 	local img rc=0
 	for img in $(pinned_images); do
 		info "trivy: $img"
-		if command -v trivy >/dev/null; then
-			trivy image --quiet --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
-		else
-			docker run --rm --read-only --tmpfs /tmp:size=1g --cap-drop ALL --security-opt no-new-privileges:true \
-				-e TRIVY_CACHE_DIR=/tmp/trivy "$TRIVY_IMAGE" image --quiet --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
-		fi
+		run_trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
+		local code=0
+		run_trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 2 --format json "$img" >/dev/null || code=$?
+		case $code in
+		0) ;;
+		2) warn "fixable CRITICAL vulnerabilities in $img"; rc=1 ;;
+		*) warn "trivy failed for $img (exit $code)"; rc=1 ;;
+		esac
 	done
-	return "$rc"
+	[ "$rc" -eq 0 ] && info "scan passed (no fixable CRITICAL)" || die "scan failed"
 }
 
 cmd=${1:-help}
