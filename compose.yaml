@@ -1,0 +1,86 @@
+# Base stack: cloudflared + auth gateway.
+# MCP servers live in servers/<name>/compose.yaml and are merged in by ./mcp
+# (docker compose -f compose.yaml -f servers/a/compose.yaml -f …).
+# Use ./mcp instead of plain `docker compose` so every server is included.
+#
+# No service publishes ports. cloudflared is the only container with egress
+# besides servers that explicitly join their own <name>-egress network.
+name: mcp-host
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    command: ["tunnel", "run"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - path: ${MCP_SECRETS_DIR:-/etc/mcp-host}/tunnel.env # TUNNEL_TOKEN
+        required: true
+    environment:
+      NO_AUTOUPDATE: "true"
+      # Shared by `tunnel run` and the `tunnel ready` healthcheck.
+      TUNNEL_METRICS: 127.0.0.1:20241
+      # Never use debug: it logs all request headers, including upstream tokens.
+      TUNNEL_LOGLEVEL: info
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    networks: [edge, ingress]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gateway:
+    build: ./gateway
+    image: mcp-host/gateway:local
+    pull_policy: build
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - path: ${MCP_SECRETS_DIR:-/etc/mcp-host}/gateway.env # <NAME>_UPSTREAM_TOKEN=…
+        required: true
+    volumes:
+      # Route definitions only; servers/ never contains secrets.
+      - ./servers:/etc/caddy/servers:ro
+    tmpfs:
+      - /config:size=8m,uid=65532,gid=65532,mode=0700
+      - /data:size=8m,uid=65532,gid=65532,mode=0700
+      - /tmp:size=16m,mode=1777
+    # Each server's compose file adds its <name>-backend network here.
+    networks: [ingress]
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging: *logging
+
+networks:
+  # Internet egress for cloudflared only.
+  edge: {}
+  # cloudflared <-> gateway. No egress.
+  ingress:
+    internal: true

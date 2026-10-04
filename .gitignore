@@ -1,0 +1,5 @@
+# Real secrets live in $MCP_SECRETS_DIR (default /etc/mcp-host), never here.
+*.env
+.env
+!*.env.example
+*.token

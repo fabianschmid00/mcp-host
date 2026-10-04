@@ -1,0 +1,30 @@
+{
+  "server_id": "gmx",
+  "hostname": "mail-mcp.fabiserver.de",
+  "comment": "Portal allowlist (default_disabled: true). Everything not listed stays hidden, including any tool added upstream later.",
+  "milestone_1": [
+    "list_available_accounts",
+    "list_emails_metadata",
+    "get_emails_content",
+    "list_mailboxes"
+  ],
+  "milestone_2_add": [
+    "save_draft"
+  ],
+  "never": [
+    "send_email",
+    "forward_email",
+    "save_to_mailbox",
+    "delete_emails",
+    "set_email_flags",
+    "set_email_tags",
+    "mark_emails_as_read",
+    "move_emails",
+    "archive_emails",
+    "get_attachment_content",
+    "download_attachment",
+    "list_email_tags",
+    "list_allowed_recipients",
+    "list_allowed_senders"
+  ]
+}

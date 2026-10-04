@@ -1,0 +1,3 @@
+http://mail-mcp.fabiserver.de:8080 {
+	import mcp_route {$GMX_UPSTREAM_TOKEN} gmx:9557
+}
