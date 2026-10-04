@@ -1,0 +1,491 @@
+#!/usr/bin/env bash
+# ./mcp: operate the MCP host stack. Run `./mcp help`.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+cd "$ROOT"
+# shellcheck source=mcp.conf
+. ./mcp.conf
+export MCP_SECRETS_DIR
+
+TRIVY_IMAGE="aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa"
+INIT_BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-verify","version":"1"}}}'
+MCP_ACCEPT='application/json, text/event-stream'
+
+die() { echo "mcp: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+warn() { echo "WARN: $*" >&2; }
+
+usage() {
+	cat <<'EOF'
+Usage: ./mcp <command> [args]
+
+Setup
+  init                       Create $MCP_SECRETS_DIR, copy env templates, generate missing tokens
+  token <name> [--rotate]    Print the upstream token for <name> (create if missing, or rotate)
+  add <name> --image IMG --port N [--hostname H] [--egress]
+                             Scaffold servers/<name> + gateway route + token, print Cloudflare steps
+  remove <name> [--yes]      Stop and delete a server, its route, token and secrets file
+
+Run
+  check                      Preflight: secrets perms, tokens, pinned images, compose config
+  up | down | ps | logs [svc] | restart [svc]
+  dc <args…>                 Raw `docker compose` with every server file included
+
+Verify
+  verify [name] [--public]   Gateway checks (401 without token, initialize with token, /mcp and /mcp/)
+                             --public: same through Cloudflare, plus the portal's 401/WWW-Authenticate
+  inspect                    Hardening evidence for every running container
+  update                     Show whether pinned image tags now point to a different digest
+  scan                       trivy scan (HIGH/CRITICAL) of every pinned image
+EOF
+}
+
+servers() {
+	local d
+	for d in servers/*/; do
+		[ -f "$d/compose.yaml" ] && basename "$d"
+	done
+	return 0
+}
+token_var() { echo "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')_UPSTREAM_TOKEN"; }
+server_host() { sed -nE 's#^http://([^: ]+):8080.*#\1#p' "servers/$1/route.caddy" | head -n1; }
+server_exists() { [ -f "servers/$1/compose.yaml" ] || die "no such server: $1"; }
+
+compose() {
+	local args=(-f compose.yaml) s
+	for s in $(servers); do args+=(-f "servers/$s/compose.yaml"); done
+	docker compose "${args[@]}" "$@"
+}
+
+valid_name() {
+	[[ $1 =~ ^[a-z][a-z0-9-]{0,29}$ && $1 != *- ]] ||
+		die "invalid name '$1': lowercase letters, digits and '-', max 30 chars, no '_' (the portal splits tool names on the first '_')"
+	case $1 in gateway | cloudflared | edge | ingress) die "'$1' is reserved" ;; esac
+}
+
+new_token() {
+	if command -v openssl >/dev/null; then
+		openssl rand -hex 32
+	else
+		head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+	fi
+}
+
+# --- secrets files ---------------------------------------------------------
+
+ensure_secrets_dir() {
+	if [ ! -d "$MCP_SECRETS_DIR" ]; then
+		install -d -m 700 "$MCP_SECRETS_DIR" 2>/dev/null ||
+			die "cannot create $MCP_SECRETS_DIR; run: sudo install -d -m 700 -o \"$USER\" \"$MCP_SECRETS_DIR\""
+	fi
+	[ -w "$MCP_SECRETS_DIR" ] || die "$MCP_SECRETS_DIR is not writable by $USER"
+	chmod 700 "$MCP_SECRETS_DIR"
+}
+
+copy_template() { # src dest
+	if [ -e "$2" ]; then return 0; fi
+	(umask 077 && cp "$1" "$2")
+	chmod 600 "$2"
+	info "created $2 from $1 (fill it in)"
+}
+
+get_var() { # file var
+	[ -f "$1" ] || return 0
+	sed -n "s/^$2=//p" "$1" | tail -n1
+}
+
+set_var() { # file var value
+	local file=$1 var=$2 val=$3 tmp
+	tmp=$(umask 077 && mktemp "$file.XXXXXX")
+	{ [ -f "$file" ] && grep -v "^$var=" "$file" || true; } >"$tmp"
+	printf '%s=%s\n' "$var" "$val" >>"$tmp"
+	chmod 600 "$tmp"
+	mv "$tmp" "$file"
+}
+
+del_var() { # file var
+	local file=$1 var=$2 tmp
+	[ -f "$file" ] || return 0
+	tmp=$(umask 077 && mktemp "$file.XXXXXX")
+	grep -v "^$var=" "$file" >"$tmp" || true
+	chmod 600 "$tmp"
+	mv "$tmp" "$file"
+}
+
+gateway_env() { echo "$MCP_SECRETS_DIR/gateway.env"; }
+
+ensure_gateway_env() {
+	local f
+	f=$(gateway_env)
+	[ -f "$f" ] && return 0
+	(umask 077 && grep '^#' secrets/gateway.env.example >"$f")
+	chmod 600 "$f"
+}
+
+ensure_token() { # name -> prints "new" if one was generated
+	local var
+	var=$(token_var "$1")
+	ensure_gateway_env
+	if [[ ! $(get_var "$(gateway_env)" "$var") =~ ^[0-9a-f]{64}$ ]]; then
+		set_var "$(gateway_env)" "$var" "$(new_token)"
+		echo new
+	fi
+}
+
+print_token() { # name
+	local var
+	var=$(token_var "$1")
+	echo
+	echo "Upstream token for '$1' ($var). Paste it into the portal's server entry as Custom Headers:"
+	echo
+	echo "  {\"Authorization\": \"Bearer $(get_var "$(gateway_env)" "$var")\"}"
+	echo
+	echo "Do not save it anywhere else. Clear your terminal scrollback afterwards."
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_init() {
+	local s
+	ensure_secrets_dir
+	copy_template secrets/tunnel.env.example "$MCP_SECRETS_DIR/tunnel.env"
+	ensure_gateway_env
+	for s in $(servers); do
+		[ -f "servers/$s/env.example" ] && copy_template "servers/$s/env.example" "$MCP_SECRETS_DIR/$s.env"
+		if [ "$(ensure_token "$s")" = new ]; then
+			info "generated upstream token for $s (show it with: ./mcp token $s)"
+		fi
+	done
+	info "secrets live in $MCP_SECRETS_DIR; edit the files there, then run ./mcp check"
+}
+
+cmd_token() {
+	local name=${1:-} rotate=${2:-}
+	[ -n "$name" ] || die "usage: ./mcp token <name> [--rotate]"
+	server_exists "$name"
+	ensure_secrets_dir
+	if [ "$rotate" = --rotate ]; then
+		set_var "$(gateway_env)" "$(token_var "$name")" "$(new_token)"
+		info "rotated. Update the portal's Custom Headers for '$name' first, then run: ./mcp restart gateway"
+	else
+		ensure_token "$name" >/dev/null
+	fi
+	print_token "$name"
+}
+
+print_cloudflare_steps() { # name host
+	cat <<EOF
+
+Cloudflare steps for '$1' (details: docs/RUNBOOK-cloudflare.md, "Adding another server"):
+
+  1. Tunnel public hostname
+       Zero Trust -> Networks -> Tunnels -> mcp-host -> Public hostnames -> Add
+       Hostname: $2   Path: (empty)   Service: HTTP  gateway:8080
+  2. MCP server
+       Zero Trust -> AI controls -> MCP servers -> Add
+       Server ID: $1   URL: https://$2/mcp   (exactly, no trailing slash)
+       Authentication: Custom headers -> the JSON printed above
+       Access policy: Allow -> Emails -> your address
+  3. Portal $MCP_PORTAL_HOST -> add server '$1'
+       Tool allowlist from servers/$1/tools.json (everything else disabled)
+  4. Here: finish TODOs in servers/$1/compose.yaml, then
+       ./mcp up && ./mcp verify $1 && ./mcp verify $1 --public
+  5. Portal -> Sync capabilities; claude.ai -> connector -> per-tool permissions
+EOF
+}
+
+cmd_add() {
+	local name=${1:-} image="" port="" host="" egress=0 networks egress_block egress_note tvar dir f
+	[ -n "$name" ] || die "usage: ./mcp add <name> --image IMG --port N [--hostname H] [--egress]"
+	shift
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--image) image=${2:?}; shift 2 ;;
+		--port) port=${2:?}; shift 2 ;;
+		--hostname) host=${2:?}; shift 2 ;;
+		--egress) egress=1; shift ;;
+		*) die "unknown option: $1" ;;
+		esac
+	done
+	valid_name "$name"
+	dir="servers/$name"
+	[ ! -e "$dir" ] || die "$dir already exists"
+	[ -n "$image" ] || die "--image is required (pin it: repo:tag@sha256:…)"
+	[[ $image =~ ^[A-Za-z0-9./:_@-]+$ ]] || die "invalid image reference"
+	[[ $image == *@sha256:* ]] || warn "image is not pinned by digest; ./mcp check will flag it"
+	[[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "--port must be 1-65535"
+	host=${host:-$name-mcp.$MCP_DOMAIN}
+	[[ $host =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "invalid hostname: $host"
+	for f in servers/*/route.caddy; do
+		[ -e "$f" ] || continue
+		grep -q "^http://$host:8080" "$f" && die "hostname $host is already used by $f"
+	done
+	tvar=$(token_var "$name")
+
+	networks="$name-backend"
+	egress_block=""
+	egress_note="none (internal network only)"
+	if [ "$egress" -eq 1 ]; then
+		networks="$name-backend, $name-egress"
+		egress_block="  # $name -> internet. Only $name joins it.
+  $name-egress: {}"
+		egress_note="own \`$name-egress\` network (restrict ports via DOCKER-USER, see SECURITY.md)"
+	fi
+
+	mkdir -p "$dir"
+	render() {
+		sed -e "s|__NAME__|$name|g" -e "s|__IMAGE__|$image|g" -e "s|__PORT__|$port|g" \
+			-e "s|__HOSTNAME__|$host|g" -e "s|__TOKEN_VAR__|$tvar|g" \
+			-e "s|__NETWORKS__|$networks|g" -e "s|__EGRESS_NOTE__|$egress_note|g" "$1"
+	}
+	render templates/server/route.caddy >"$dir/route.caddy"
+	render templates/server/env.example >"$dir/env.example"
+	render templates/server/tools.json >"$dir/tools.json"
+	render templates/server/README.md >"$dir/README.md"
+	render templates/server/compose.yaml | awk -v block="$egress_block" '
+		$0 == "__EGRESS_NETWORK__" { if (block != "") print block; next } { print }' >"$dir/compose.yaml"
+	info "scaffolded $dir"
+
+	ensure_secrets_dir
+	copy_template "$dir/env.example" "$MCP_SECRETS_DIR/$name.env"
+	ensure_token "$name" >/dev/null
+	print_token "$name"
+	print_cloudflare_steps "$name" "$host"
+}
+
+cmd_remove() {
+	local name=${1:-} yes=${2:-} host project
+	[ -n "$name" ] || die "usage: ./mcp remove <name> [--yes]"
+	server_exists "$name"
+	host=$(server_host "$name")
+	if [ "$yes" != --yes ]; then
+		read -r -p "Remove server '$name' ($host), its token and $MCP_SECRETS_DIR/$name.env? [y/N] " ans
+		[[ $ans =~ ^[yY]$ ]] || die "aborted"
+	fi
+	project=$(compose config --format json 2>/dev/null | sed -nE 's/^[[:space:]]*"name":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)
+	project=${project:-mcp-host}
+
+	info "stopping and removing container $name"
+	compose rm --stop --force "$name" >/dev/null 2>&1 || true
+	rm -rf "servers/$name"
+	del_var "$(gateway_env)" "$(token_var "$name")"
+	rm -f "$MCP_SECRETS_DIR/$name.env"
+
+	if [ -n "$(compose ps -q gateway 2>/dev/null)" ]; then
+		info "recreating gateway without the $name route/network"
+		compose up -d --no-deps --force-recreate gateway >/dev/null
+	fi
+	docker network rm "${project}_$name-backend" "${project}_$name-egress" >/dev/null 2>&1 || true
+
+	cat <<EOF
+
+Removed '$name' locally. Remaining manual Cloudflare cleanup:
+  1. Portal $MCP_PORTAL_HOST -> remove server '$name'
+  2. AI controls -> MCP servers -> delete '$name'
+  3. Tunnel mcp-host -> Public hostnames -> delete $host (and its DNS record if it stays behind)
+Commit the deletion of servers/$name.
+EOF
+}
+
+cmd_check() {
+	local rc=0 s var perm f img
+	[ -d "$MCP_SECRETS_DIR" ] || die "$MCP_SECRETS_DIR missing; run ./mcp init"
+	perm=$(stat -c %a "$MCP_SECRETS_DIR")
+	[ "$perm" = 700 ] || { warn "$MCP_SECRETS_DIR has mode $perm (want 700)"; rc=1; }
+	for f in "$MCP_SECRETS_DIR"/*.env; do
+		[ -e "$f" ] || continue
+		perm=$(stat -c %a "$f")
+		[ "$perm" = 600 ] || { warn "$f has mode $perm (want 600)"; rc=1; }
+	done
+	[ -n "$(get_var "$MCP_SECRETS_DIR/tunnel.env" TUNNEL_TOKEN)" ] || { warn "TUNNEL_TOKEN is empty in tunnel.env"; rc=1; }
+	for s in $(servers); do
+		var=$(token_var "$s")
+		[[ $(get_var "$(gateway_env)" "$var") =~ ^[0-9a-f]{64}$ ]] || { warn "$var missing/invalid (./mcp token $s)"; rc=1; }
+		[ -f "$MCP_SECRETS_DIR/$s.env" ] || { warn "$MCP_SECRETS_DIR/$s.env missing (./mcp init)"; rc=1; }
+		grep -q "import mcp_route {\$$var} " "servers/$s/route.caddy" || { warn "servers/$s/route.caddy does not use mcp_route with $var"; rc=1; }
+		grep -q 'exit 0' "servers/$s/compose.yaml" && warn "servers/$s/compose.yaml still has the placeholder healthcheck"
+		grep -q 'TODO' "servers/$s/compose.yaml" && warn "servers/$s/compose.yaml has open TODOs"
+	done
+	while read -r img; do
+		[[ $img == *@sha256:* ]] || { warn "image not pinned by digest: $img"; rc=1; }
+	done < <(grep -hE '^[[:space:]]+image:' compose.yaml servers/*/compose.yaml | awk '{print $2}' | grep -v '^mcp-host/')
+	grep -q '@sha256:' gateway/Dockerfile || { warn "gateway base image not pinned"; rc=1; }
+	if grep -rlE 'docker\.sock' compose.yaml servers/ >/dev/null 2>&1; then warn "docker.sock referenced"; rc=1; fi
+	if grep -hE '^[[:space:]]+ports:' compose.yaml servers/*/compose.yaml >/dev/null 2>&1; then warn "published ports found"; rc=1; fi
+	compose config -q || rc=1
+	[ "$rc" -eq 0 ] && info "check passed" || die "check failed"
+}
+
+# HTTP status of a request made from inside the gateway container.
+# args: host path auth(none|good|bad) [method]
+gw_status() {
+	local host=$1 path=$2 auth=$3 var=$4
+	compose exec -T -e H="$host" -e P="$path" -e A="$auth" -e V="$var" -e B="$INIT_BODY" -e ACC="$MCP_ACCEPT" gateway sh -c '
+		case $A in
+			good) eval "tok=\${$V}" ;;
+			bad) tok=0000000000000000000000000000000000000000000000000000000000000000 ;;
+			*) tok= ;;
+		esac
+		set -- -S -q -O /tmp/verify.body -T 10 --header "Host: $H" \
+			--header "Content-Type: application/json" --header "Accept: $ACC" --post-data "$B"
+		[ -n "$tok" ] && set -- "$@" --header "Authorization: Bearer $tok"
+		wget "$@" "http://127.0.0.1:8080$P" 2>&1 | sed -nE "s#^ *HTTP/[0-9.]+ ([0-9]{3}).*#\1#p" | tail -n1
+		if [ "$A" = good ] && [ "$P" != /nope ]; then grep -q protocolVersion /tmp/verify.body 2>/dev/null && echo body-ok; fi
+		rm -f /tmp/verify.body'
+}
+
+expect() { # label want got
+	if [ "$3" = "$2" ]; then
+		printf '  PASS  %-48s %s\n' "$1" "$3"
+	else
+		printf '  FAIL  %-48s got %s, want %s\n' "$1" "${3:-<none>}" "$2"
+		VERIFY_RC=1
+	fi
+}
+
+verify_local() { # name
+	local name=$1 host var out
+	host=$(server_host "$name")
+	var=$(token_var "$name")
+	info "gateway checks for $name ($host)"
+	expect "no token          POST /mcp  -> 401" 401 "$(gw_status "$host" /mcp none "$var" | head -n1)"
+	expect "wrong token       POST /mcp  -> 401" 401 "$(gw_status "$host" /mcp bad "$var" | head -n1)"
+	expect "no token          POST /mcp/ -> 401" 401 "$(gw_status "$host" /mcp/ none "$var" | head -n1)"
+	out=$(gw_status "$host" /mcp good "$var" | tr '\n' ' ')
+	expect "token initialize  POST /mcp  -> 200" "200 body-ok " "$out"
+	out=$(gw_status "$host" /mcp/ good "$var" | tr '\n' ' ')
+	expect "token initialize  POST /mcp/ -> 200 (no redirect)" "200 body-ok " "$out"
+	expect "token             POST /nope -> 404" 404 "$(gw_status "$host" /nope good "$var" | head -n1)"
+	expect "unknown host      POST /mcp  -> 404" 404 "$(gw_status unknown.invalid /mcp good "$var" | head -n1)"
+	local other
+	for other in $(servers); do
+		[ "$other" = "$name" ] && continue
+		expect "token of '$other' POST /mcp  -> 401" 401 "$(gw_status "$host" /mcp good "$(token_var "$other")" | head -n1)"
+	done
+}
+
+curl_status() { # url [headerfile] -> status
+	local args=(-s -o /dev/null -w '%{http_code}' --max-time 15 -X POST -H 'Content-Type: application/json' -H "Accept: $MCP_ACCEPT" --data "$INIT_BODY")
+	[ -n "${2:-}" ] && args+=(-H "@$2")
+	curl "${args[@]}" "$1"
+}
+
+verify_public() { # name
+	local name=$1 host var hdr www
+	host=$(server_host "$name")
+	var=$(token_var "$name")
+	command -v curl >/dev/null || die "curl is required for --public"
+	hdr=$(umask 077 && mktemp)
+	trap 'rm -f "$hdr"' RETURN
+	printf 'Authorization: Bearer %s\n' "$(get_var "$(gateway_env)" "$var")" >"$hdr"
+	info "public checks for $name via Cloudflare (https://$host)"
+	expect "no token          POST /mcp  -> 401" 401 "$(curl_status "https://$host/mcp")"
+	expect "token             POST /mcp  -> 200" 200 "$(curl_status "https://$host/mcp" "$hdr")"
+	expect "token             POST /mcp/ -> 200" 200 "$(curl_status "https://$host/mcp/" "$hdr")"
+	info "portal check (https://$MCP_PORTAL_HOST/mcp)"
+	www=$(curl -s -o /dev/null -D - --max-time 15 -X POST "https://$MCP_PORTAL_HOST/mcp" | tr -d '\r' | grep -i '^www-authenticate:' || true)
+	expect "portal unauthenticated -> 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST "https://$MCP_PORTAL_HOST/mcp")"
+	if grep -qi 'resource_metadata=.*/.well-known/oauth-protected-resource' <<<"$www"; then
+		printf '  PASS  %-48s\n' "portal WWW-Authenticate has resource_metadata"
+	else
+		printf '  FAIL  %-48s got: %s\n' "portal WWW-Authenticate has resource_metadata" "${www:-<none>}"
+		VERIFY_RC=1
+	fi
+}
+
+cmd_verify() {
+	local names=() public=0 s
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--public) public=1 ;;
+		*) server_exists "$1"; names+=("$1") ;;
+		esac
+		shift
+	done
+	[ ${#names[@]} -gt 0 ] || mapfile -t names < <(servers)
+	VERIFY_RC=0
+	for s in "${names[@]}"; do
+		if [ "$public" -eq 1 ]; then verify_public "$s"; else verify_local "$s"; fi
+	done
+	[ "$VERIFY_RC" -eq 0 ] && info "verify passed" || die "verify failed"
+}
+
+cmd_inspect() {
+	local ids id rc=0 line
+	ids=$(compose ps -q)
+	[ -n "$ids" ] || die "no running containers"
+	printf '%-22s %-12s %-6s %-9s %-24s %-6s %-5s %-6s %s\n' CONTAINER USER RO_FS CAP_DROP SECURITY_OPT PORTS SOCK PRIV IMAGE
+	for id in $ids; do
+		line=$(docker inspect -f '{{.Name}}|{{.Config.User}}|{{.HostConfig.ReadonlyRootfs}}|{{join .HostConfig.CapDrop ","}}|{{join .HostConfig.CapAdd ","}}|{{join .HostConfig.SecurityOpt ","}}|{{len .HostConfig.PortBindings}}|{{range .Mounts}}{{.Source}} {{end}}|{{.HostConfig.Privileged}}|{{.Config.Image}}' "$id")
+		IFS='|' read -r n user ro capdrop capadd secopt ports mounts priv image <<<"$line"
+		local sock=no
+		[[ $mounts == *docker.sock* ]] && sock=YES
+		printf '%-22s %-12s %-6s %-9s %-24s %-6s %-5s %-6s %s\n' "${n#/}" "${user:-root}" "$ro" "$capdrop" "$secopt" "$ports" "$sock" "$priv" "$image"
+		{ [[ -n $user && $user != 0* && $user != root* ]] && [ "$ro" = true ] && [ "$capdrop" = ALL ] && [ -z "$capadd" ] &&
+			[[ $secopt == *no-new-privileges:true* ]] && [ "$ports" = 0 ] && [ "$sock" = no ] && [ "$priv" = false ] &&
+			{ [[ $image == *@sha256:* ]] || [[ $image == mcp-host/* ]]; }; } || { warn "${n#/} fails a hardening requirement"; rc=1; }
+	done
+	[ "$rc" -eq 0 ] && info "all containers hardened" || die "inspect found problems"
+}
+
+pinned_images() {
+	{
+		grep -hE '^[[:space:]]+image:' compose.yaml servers/*/compose.yaml | awk '{print $2}'
+		sed -nE 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/p' gateway/Dockerfile
+	} | grep '@sha256:' | sort -u
+}
+
+cmd_update() {
+	local img ref pinned current
+	command -v docker >/dev/null || die "docker required"
+	info "checking whether pinned tags moved (new versions: Renovate PRs or bump the tag yourself)"
+	for img in $(pinned_images); do
+		ref=${img%@*}
+		pinned=${img#*@}
+		current=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/{print $2; exit}')
+		if [ -z "$current" ]; then
+			printf '  ????  %s (could not resolve)\n' "$ref"
+		elif [ "$current" = "$pinned" ]; then
+			printf '  same  %s\n' "$ref"
+		else
+			printf '  MOVED %s\n        pinned  %s\n        current %s\n' "$ref" "$pinned" "$current"
+		fi
+	done
+}
+
+cmd_scan() {
+	local img rc=0
+	for img in $(pinned_images); do
+		info "trivy: $img"
+		if command -v trivy >/dev/null; then
+			trivy image --quiet --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
+		else
+			docker run --rm --read-only --tmpfs /tmp:size=1g --cap-drop ALL --security-opt no-new-privileges:true \
+				-e TRIVY_CACHE_DIR=/tmp/trivy "$TRIVY_IMAGE" image --quiet --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
+		fi
+	done
+	return "$rc"
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+case $cmd in
+init) cmd_init ;;
+token) cmd_token "$@" ;;
+add) cmd_add "$@" ;;
+remove) cmd_remove "$@" ;;
+check) cmd_check ;;
+up) cmd_check && compose up -d --build --remove-orphans ;;
+down) compose down ;;
+ps) compose ps ;;
+logs) compose logs --tail=200 "$@" ;;
+restart) compose restart "$@" ;;
+dc) compose "$@" ;;
+verify) cmd_verify "$@" ;;
+inspect) cmd_inspect ;;
+update) cmd_update ;;
+scan) cmd_scan ;;
+help | -h | --help) usage ;;
+*) usage; exit 1 ;;
+esac

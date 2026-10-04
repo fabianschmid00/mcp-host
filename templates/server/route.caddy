@@ -1,0 +1,3 @@
+http://__HOSTNAME__:8080 {
+	import mcp_route {$__TOKEN_VAR__} __NAME__:__PORT__
+}
