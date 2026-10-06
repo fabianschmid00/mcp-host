@@ -507,6 +507,9 @@ cmd_scan() {
 	for img in $(local_images); do
 		tar=".scan/$(printf '%s' "$img" | tr '/:' '__').tar"
 		docker save -o "$tar" "$img"
+		# trivy runs as root without capabilities, so it cannot read another
+		# user's 0600 file. Image layers only, nothing secret.
+		chmod 644 "$tar"
 		scan_one "$img (local build)" --input "$tar"
 		rm -f "$tar"
 	done
