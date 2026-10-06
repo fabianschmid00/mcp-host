@@ -184,9 +184,9 @@ Access controls → Applications → the portal's auto-created app → **Advance
 ### D4. Tool allowlist
 
 Portal → server `gmx` → tools. Disable everything, then enable only the
-`milestone_1` list in `servers/gmx/tools.json`:
+`allow` list in `servers/gmx/tools.json`:
 
-`list_available_accounts`, `list_emails_metadata`, `get_emails_content`, `list_mailboxes`
+`list_available_accounts`, `list_emails_metadata`, `get_emails_content`, `list_mailboxes`, `save_draft`
 
 Prefer the API's allowlist mode (`default_disabled: true` + `updated_tools`)
 so tools added by future upstream versions start hidden. The exact endpoint
