@@ -1,15 +1,18 @@
 # Accepted findings for ./mcp scan. Every entry needs a reason and an expiry;
 # after expired_at the finding fails the scan again. Re-check on every image bump.
+# Evidence: docs/VERIFICATION.md, "CVE reachability in mcp-email-server:1.11.0".
 vulnerabilities:
   - id: CVE-2026-102268
     expired_at: 2026-11-30
     statement: >-
       PyJWT 2.13.0 in mcp-email-server 1.11.0. Only imported by
-      mcp/client/auth/extensions/client_credentials.py (MCP client OAuth);
-      the server never runs client code and does no JWT handling.
+      mcp/client/auth/extensions/client_credentials.py (MCP client OAuth).
+      Verified on the real image: after a full MCP session `jwt` is not in
+      sys.modules.
   - id: CVE-2026-63374
     expired_at: 2026-11-30
     statement: >-
-      anyio 4.11.0 TLS IDN hostname issue in mcp-email-server 1.11.0. The server
-      makes no outbound HTTP; IMAP (aioimaplib) uses the stdlib ssl module, not
-      anyio's TLS streams. Inbound traffic is plain HTTP from the gateway.
+      anyio 4.11.0 TLS issue in mcp-email-server 1.11.0. anyio's TLS stream is
+      only used by httpcore (never loaded; no outbound HTTP) and anyio's
+      connect_tcp(tls=...), which nothing calls. IMAP uses asyncio with the
+      stdlib ssl module; inbound traffic is plain HTTP from the gateway.
