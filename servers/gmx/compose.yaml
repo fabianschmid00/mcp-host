@@ -1,0 +1,78 @@
+# GMX mailbox via mcp-email-server (https://github.com/Wh1isper/mcp-email-server).
+# Secrets (address, app password) come from $MCP_SECRETS_DIR/gmx.env.
+# The safety policy is set here, in git: `environment` overrides env_file, so
+# nothing in gmx.env can widen it.
+services:
+  gateway:
+    networks: [gmx-backend]
+
+  gmx:
+    image: ghcr.io/wh1isper/mcp-email-server:1.11.0@sha256:f3b5a29595432324af997881b7e3cf16f3baf799da054014a099c5d371fbad8c
+    command: ["streamable-http"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - path: ${MCP_SECRETS_DIR:-/etc/mcp-host}/gmx.env
+        required: true
+    environment:
+      # tmpfs; holds the rebuildable metadata index (RAM only, never on disk).
+      HOME: /config
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "9557"
+      # DNS-rebinding protection: the gateway forwards the public Host header.
+      MCP_ALLOWED_HOSTS: mail-mcp.fabiserver.de,gmx
+      MCP_ALLOWED_ORIGINS: https://mail-mcp.fabiserver.de
+      MCP_EMAIL_SERVER_CREDENTIAL_STORAGE: plaintext # nothing is stored; skip keyring probing
+      MCP_EMAIL_SERVER_LOG_LEVEL: INFO
+
+      MCP_EMAIL_SERVER_ACCOUNT_NAME: gmx
+      MCP_EMAIL_SERVER_IMAP_HOST: imap.gmx.net
+      MCP_EMAIL_SERVER_IMAP_PORT: "993"
+      MCP_EMAIL_SERVER_IMAP_SSL: "true"
+      MCP_EMAIL_SERVER_IMAP_START_SSL: "false"
+      MCP_EMAIL_SERVER_IMAP_VERIFY_SSL: "true"
+
+      # ---- Safety policy (see SECURITY.md) --------------------------------
+      # No SMTP at all: sending is impossible regardless of mutations. This is
+      # what makes the unrestricted local-file `attachments` argument harmless
+      # (a draft only ever lands in your own Drafts folder).
+      MCP_EMAIL_SERVER_SMTP_HOST: ""
+      # IMPORTANT: unset would mean "all five classes". Always set explicitly.
+      # Milestone 1: ""            (read-only)
+      # Milestone 2: "draft"       (+ ALLOWED_RECIPIENTS "*", drafts check it)
+      MCP_EMAIL_SERVER_ALLOWED_MUTATIONS: ""
+      MCP_EMAIL_SERVER_ACCOUNT_ALLOWED_MUTATIONS: ""
+      MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS: ""
+      MCP_EMAIL_SERVER_ENABLE_ATTACHMENT_DOWNLOAD: "false"
+      MCP_EMAIL_SERVER_ENABLE_ATTACHMENT_CONTENT: "false"
+    tmpfs:
+      - /config:size=64m,uid=10001,gid=10001,mode=0700
+      - /tmp:size=64m,mode=1777
+    networks: [gmx-backend, gmx-egress]
+    cpus: 1.0
+    mem_limit: 384m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9557), 2).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # gateway <-> gmx. No egress.
+  gmx-backend:
+    internal: true
+  # gmx -> imap.gmx.net:993. Only gmx joins it. The fixed bridge name lets the
+  # optional DOCKER-USER rules in SECURITY.md restrict it to port 993 + DNS.
+  gmx-egress:
+    driver_opts:
+      com.docker.network.bridge.name: mcp-gmx-egress

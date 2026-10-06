@@ -1,0 +1,6 @@
+{
+  "server_id": "__NAME__",
+  "hostname": "__HOSTNAME__",
+  "comment": "Portal allowlist (default_disabled: true). List only the tools to expose.",
+  "allow": []
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests", "helpers:pinGitHubActionDigests"],
+  "dependencyDashboard": true,
+  "automerge": false,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "One PR per image; mail server bumps get a reminder to re-read the changelog for new tools/env vars.",
+      "matchPackageNames": ["ghcr.io/wh1isper/mcp-email-server"],
+      "prBodyNotes": ["Check the upstream changelog for new tools or changed policy env vars before merging. New tools stay hidden by the portal allowlist."]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Pinned tool images referenced outside compose files (./mcp, CI).",
+      "managerFilePatterns": ["/^mcp$/", "/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["(?<depName>[a-z0-9][a-z0-9./-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker"
+    }
+  ]
+}
