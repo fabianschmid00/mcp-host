@@ -11,13 +11,11 @@
 
 ## Policy
 
-| Phase | `ALLOWED_MUTATIONS` | `ALLOWED_RECIPIENTS` | Portal allowlist |
-|---|---|---|---|
-| Milestone 1 | `""` (read-only) | `""` | the 4 read tools in `tools.json` |
-| Milestone 2 | `draft` | `*` | + `save_draft` |
+| `ALLOWED_MUTATIONS` | `ALLOWED_RECIPIENTS` | Portal allowlist |
+|---|---|---|
+| `draft` | `*` | the 4 read tools + `save_draft` (`tools.json`) |
 
-`MCP_EMAIL_SERVER_SMTP_HOST` is forced to `""`, so the server cannot send mail
-in either phase. Why that matters: `save_draft`/`send_email` accept arbitrary
+`MCP_EMAIL_SERVER_SMTP_HOST` is forced to `""`, so the server cannot send mail. Why that matters: `save_draft`/`send_email` accept arbitrary
 **server-local file paths** as attachments (for example `/proc/self/environ`,
 which contains the app password). With no SMTP, the worst case is such a file
 landing in your own Drafts folder. Do not enable SMTP without first putting a

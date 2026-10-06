@@ -2,13 +2,11 @@
   "server_id": "gmx",
   "hostname": "mail-mcp.fabiserver.de",
   "comment": "Portal allowlist (default_disabled: true). Everything not listed stays hidden, including any tool added upstream later.",
-  "milestone_1": [
+  "allow": [
     "list_available_accounts",
     "list_emails_metadata",
     "get_emails_content",
-    "list_mailboxes"
-  ],
-  "milestone_2_add": [
+    "list_mailboxes",
     "save_draft"
   ],
   "never": [

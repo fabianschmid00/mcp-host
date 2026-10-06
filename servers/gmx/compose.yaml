@@ -41,11 +41,12 @@ services:
       # (a draft only ever lands in your own Drafts folder).
       MCP_EMAIL_SERVER_SMTP_HOST: ""
       # IMPORTANT: unset would mean "all five classes". Always set explicitly.
-      # Milestone 1: ""            (read-only)
-      # Milestone 2: "draft"       (+ ALLOWED_RECIPIENTS "*", drafts check it)
-      MCP_EMAIL_SERVER_ALLOWED_MUTATIONS: ""
-      MCP_EMAIL_SERVER_ACCOUNT_ALLOWED_MUTATIONS: ""
-      MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS: ""
+      # "draft" only: save_draft works; send/organize/delete/append are refused.
+      # Read-only would be "" (and ALLOWED_RECIPIENTS "").
+      MCP_EMAIL_SERVER_ALLOWED_MUTATIONS: "draft"
+      MCP_EMAIL_SERVER_ACCOUNT_ALLOWED_MUTATIONS: "draft"
+      # save_draft checks recipients too; "*" is safe only because there is no SMTP.
+      MCP_EMAIL_SERVER_ALLOWED_RECIPIENTS: "*"
       MCP_EMAIL_SERVER_ENABLE_ATTACHMENT_DOWNLOAD: "false"
       MCP_EMAIL_SERVER_ENABLE_ATTACHMENT_CONTENT: "false"
     tmpfs:
