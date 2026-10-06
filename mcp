@@ -459,18 +459,19 @@ run_trivy() {
 		trivy "$@"
 	else
 		docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
-			-v mcp-host-trivy-cache:/root/.cache/trivy "$TRIVY_IMAGE" "$@"
+			-v mcp-host-trivy-cache:/root/.cache/trivy -v "$ROOT:/src:ro" -w /src "$TRIVY_IMAGE" "$@"
 	fi
 }
 
-# Reports HIGH+CRITICAL; fails only on CRITICAL with a fix available.
+# Reports HIGH+CRITICAL; fails only on CRITICAL with a fix available that is not
+# accepted (with reason and expiry) in .trivyignore.yaml.
 cmd_scan() {
 	local img rc=0
 	for img in $(pinned_images); do
 		info "trivy: $img"
-		run_trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed "$img" || rc=1
+		run_trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml "$img" || rc=1
 		local code=0
-		run_trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 2 --format json "$img" >/dev/null || code=$?
+		run_trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --exit-code 2 --format json "$img" >/dev/null || code=$?
 		case $code in
 		0) ;;
 		2) warn "fixable CRITICAL vulnerabilities in $img"; rc=1 ;;

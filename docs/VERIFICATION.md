@@ -86,7 +86,7 @@ Upstream Caddy cannot exec under `cap_drop: ALL` + `no-new-privileges`
 | gitleaks (history + working tree) | done, CI | no leaks found |
 | trivy `caddy:2.11.6-alpine` | done | 0 HIGH/CRITICAL |
 | trivy `cloudflared:2026.9.3` | done | 0 CRITICAL; 2 HIGH (`libssl3t64` CVE-2026-75804, OpenSSL QUIC DoS, fixed in `3.5.7-1~deb13u3`); accepted until the next cloudflared release (Renovate) |
-| trivy `mcp-email-server:1.11.0` | CI | could not pull layers in the sandbox |
+| trivy `mcp-email-server:1.11.0` | CI | 2 fixable CRITICAL, both **accepted until 2026-11-30** in `.trivyignore.yaml` as unreachable: PyJWT CVE-2026-102268 (only imported by the MCP SDK's *client* auth extension) and anyio CVE-2026-63374 (TLS streams; the server makes no outbound HTTP, IMAP uses stdlib `ssl`). 9 HIGH reported (PyJWT, msgpack, setuptools, urllib3, pcre2); revisit with the next upstream release |
 
 ## Scaffolding
 
