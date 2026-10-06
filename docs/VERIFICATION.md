@@ -5,12 +5,12 @@ Status legend: **done** (evidence below), **CI** (checked on every PR by
 
 ## Where the evidence comes from
 
-The development sandbox could not download layers from ghcr.io (manifests
-only), so local tests used a **stand-in image**: `python:3.13-slim` with
-`mcp-email-server==1.11.0` from PyPI installed into `/app/.venv`, matching
-the upstream Dockerfile at tag `1.11.0` (same base, venv path and entrypoint,
-minus `tini`). CI on GitHub runs the same checks against the **real pinned
-image**. Repeat the "on the VM" column once there.
+The first round of local tests (2026-10-04) used a **stand-in image**
+(`python:3.13-slim` + `mcp-email-server==1.11.0` from PyPI in `/app/.venv`)
+because the sandbox could not download ghcr.io layers. On 2026-10-06 the
+**real pinned image** was pulled and `./mcp check`, `./mcp verify` and
+`./mcp inspect` were re-run against it, all passing (below). CI runs the same
+checks against the real image on every PR. Repeat the "on the VM" section once there.
 
 ## Milestone 1: read-only feasibility
 
@@ -44,13 +44,18 @@ image**. Repeat the "on the VM" column once there.
 
 ## Container hardening (`./mcp inspect`)
 
-Local (stand-in gmx image, hence the expected "not pinned" warning):
+Local, real pinned gmx image (2026-10-06):
 
 ```
 CONTAINER              USER         RO_FS  CAP_DROP  SECURITY_OPT             PORTS  SOCK  PRIV   IMAGE
 mcp-host-gateway-1     65532:65532  true   ALL       no-new-privileges:true   0      no    false  mcp-host/gateway:local
-mcp-host-gmx-1         10001:10001  true   ALL       no-new-privileges:true   0      no    false  local/mcp-email-server:standin
+mcp-host-gmx-1         10001:10001  true   ALL       no-new-privileges:true   0      no    false  ghcr.io/wh1isper/mcp-email-server:1.11.0@sha256:f3b5a29595432324af997881b7e3cf16f3baf799da054014a099c5d371fbad8c
+==> all containers hardened
 ```
+
+The image itself declares no user (root) and `ENTRYPOINT ["tini", "--",
+"mcp-email-server"]`; compose overrides the user to `10001:10001`, and both
+containers reach **healthy** with a read-only rootfs.
 
 ```
 $ docker exec mcp-host-gmx-1 sh -c 'id; touch /x'
@@ -76,7 +81,7 @@ Upstream Caddy cannot exec under `cap_drop: ALL` + `no-new-privileges`
 
 | Check | Status |
 |---|---|
-| No published ports, non-root, read-only rootfs, caps dropped, no-new-privileges, no docker.sock | done (gateway, gmx), CI; cloudflared pending: user |
+| No published ports, non-root, read-only rootfs, caps dropped, no-new-privileges, no docker.sock | done (gateway, real gmx image), CI; cloudflared pending: user |
 | Images pinned by digest | done; `./mcp check` enforces it |
 
 ## Scans
@@ -86,7 +91,29 @@ Upstream Caddy cannot exec under `cap_drop: ALL` + `no-new-privileges`
 | gitleaks (history + working tree) | done, CI | no leaks found |
 | trivy `caddy:2.11.6-alpine` | done | 0 HIGH/CRITICAL |
 | trivy `cloudflared:2026.9.3` | done | 0 CRITICAL; 2 HIGH (`libssl3t64` CVE-2026-75804, OpenSSL QUIC DoS, fixed in `3.5.7-1~deb13u3`); accepted until the next cloudflared release (Renovate) |
-| trivy `mcp-email-server:1.11.0` | CI | 2 fixable CRITICAL, both **accepted until 2026-11-30** in `.trivyignore.yaml` as unreachable: PyJWT CVE-2026-102268 (only imported by the MCP SDK's *client* auth extension) and anyio CVE-2026-63374 (TLS streams; the server makes no outbound HTTP, IMAP uses stdlib `ssl`). 9 HIGH reported (PyJWT, msgpack, setuptools, urllib3, pcre2); revisit with the next upstream release |
+| trivy `mcp-email-server:1.11.0` | done, CI | 2 fixable CRITICAL + 10 HIGH (local scan of the real image matches CI). Both CRITICALs **accepted until 2026-11-30** in `.trivyignore.yaml`; runtime evidence below |
+
+### CVE reachability in `mcp-email-server:1.11.0` (real image, 2026-10-06)
+
+Method: the real server ran in the real image (`--user 10001:10001
+--read-only --cap-drop ALL --network none`), a full MCP session was driven
+against it with the stdlib HTTP client (initialize, `tools/list`,
+`list_available_accounts`, `list_mailboxes`, `list_emails_metadata`,
+`save_draft` with `draft` allowed; the IMAP calls fail on DNS as expected), and
+`sys.modules` was read afterwards. Then the image's site-packages were grepped
+for callers.
+
+| Package (version → fix) | Findings | Loaded at runtime? | Verdict |
+|---|---|---|---|
+| PyJWT 2.13.0 → 2.14.0 | CRITICAL CVE-2026-102268, 5 HIGH | `jwt`: **no** | Not reachable: only imported by `mcp/client/auth/extensions/client_credentials.py` (MCP client OAuth) |
+| anyio 4.11.0 → 4.14.2 | CRITICAL CVE-2026-63374 (TLS) | `anyio.streams.tls`: imported, never used | Not reachable: its only users are `httpcore` (**not loaded**; no outbound HTTP) and anyio's own `connect_tcp(tls=…)`, which nothing calls. IMAP uses asyncio `create_connection(ssl=ssl.create_default_context(...))`; every `start_tls` in the app/aiosmtplib is asyncio's `loop.start_tls`, not anyio |
+| urllib3 2.7.0, msgpack 1.1.2 | HIGH | **no** | Vendored inside the base image's system pip (`/usr/local/lib/python3.13/site-packages/pip/_vendor/`); only runs when someone invokes `pip` |
+| setuptools 70.3.0 | HIGH | **no** (`setuptools`, `pkg_resources`) | Base-image packaging tooling; not imported by the server |
+| libpcre2-8-0 (Debian) | HIGH | n/a | OS library from `python:3.13-slim`; fixed in `10.46-1~deb13u3`, arrives with the next upstream image build |
+
+When the exception expires or Renovate bumps the image: re-run `./mcp scan`;
+if PyJWT ≥ 2.14.0 and anyio ≥ 4.14.2 are in, delete both entries from
+`.trivyignore.yaml`.
 
 ## Scaffolding
 
