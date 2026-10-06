@@ -9,9 +9,24 @@
       "description": "One PR per image; mail server bumps get a reminder to re-read the changelog for new tools/env vars.",
       "matchPackageNames": ["ghcr.io/wh1isper/mcp-email-server"],
       "prBodyNotes": ["Check the upstream changelog for new tools or changed policy env vars before merging. New tools stay hidden by the portal allowlist."]
+    },
+    {
+      "description": "garmin_mcp bumps: drop entries from servers/garmin/requirements-overrides.txt that upstream's uv.lock now covers.",
+      "matchDepNames": ["garmin_mcp"],
+      "prBodyNotes": ["Re-check servers/garmin/requirements-overrides.txt against the new uv.lock, and review new tools (all tools are exposed)."]
     }
   ],
   "customManagers": [
+    {
+      "customType": "regex",
+      "description": "garmin_mcp has no releases or image; track its main branch by commit.",
+      "managerFilePatterns": ["/^servers/garmin/Dockerfile$/"],
+      "matchStrings": ["ARG GARMIN_MCP_COMMIT=(?<currentDigest>[a-f0-9]{40})"],
+      "depNameTemplate": "garmin_mcp",
+      "packageNameTemplate": "https://github.com/taxuspt/garmin_mcp",
+      "currentValueTemplate": "main",
+      "datasourceTemplate": "git-refs"
+    },
     {
       "customType": "regex",
       "description": "Pinned tool images referenced outside compose files (./mcp, CI).",

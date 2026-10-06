@@ -58,12 +58,12 @@ jobs:
         run: |
           docker compose -f compose.yaml build gateway
           for env in "GMX_UPSTREAM_TOKEN=" "GMX_UPSTREAM_TOKEN=short"; do
-            if docker run --rm -v "$PWD/servers:/etc/caddy/servers:ro" -e "$env" mcp-host/gateway:local; then
+            if docker run --rm -v "$PWD/servers/gmx:/etc/caddy/servers/gmx:ro" -e "$env" mcp-host/gateway:local; then
               echo "gateway started with $env" >&2; exit 1
             fi
           done
-      - name: up (without cloudflared)
-        run: ./mcp dc up -d --build --wait gateway gmx
+      - name: up (every service except cloudflared)
+        run: ./mcp dc up -d --build --wait $(./mcp dc config --services | grep -vx cloudflared)
       - name: verify
         run: ./mcp verify
       - name: inspect
@@ -86,5 +86,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: build local images
+        run: |
+          mkdir -p /tmp/mcp-secrets && MCP_SECRETS_DIR=/tmp/mcp-secrets ./mcp init >/dev/null
+          MCP_SECRETS_DIR=/tmp/mcp-secrets ./mcp dc build
       - name: trivy (fails on fixable CRITICAL)
-        run: ./mcp scan
+        run: MCP_SECRETS_DIR=/tmp/mcp-secrets ./mcp scan
