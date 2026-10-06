@@ -2,7 +2,8 @@
 
 Self-hosted MCP servers on a home server, reachable from claude.ai (web and
 mobile) and Claude Code through one Cloudflare MCP server portal. First
-server: a GMX mailbox, **read + drafts only**.
+server: a GMX mailbox, **read + drafts only**. Second: Garmin Connect
+(`servers/garmin`, all tools, see its README).
 
 ```
 claude.ai / mobile / Claude Code

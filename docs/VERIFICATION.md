@@ -122,6 +122,18 @@ if PyJWT ≥ 2.14.0 and anyio ≥ 4.14.2 are in, delete both entries from
 | `./mcp add test` → hardened scaffold | done, CI | compose/route/env/tools/README generated, token created, Cloudflare steps printed; after filling the TODOs, `./mcp verify test` passed all checks |
 | `./mcp remove test` → fully cleaned up | done, CI | container, `test-backend` network, `servers/test`, token line and `test.env` gone; gateway recreated without the network |
 
+## Garmin (`servers/garmin`, 2026-10-06, local build)
+
+| Check | Status | Evidence |
+|---|---|---|
+| Image builds from pinned commit `cfc5d79` + `uv.lock --frozen` + hash-pinned overrides | done, CI | 299 MB; `h11 0.16.0`, `httpcore 1.0.9`, `urllib3 2.8.0`, `garminconnect 0.3.2`, `mcp 1.28.1` |
+| Gateway checks (401/initialize/`/mcp/`/404, cross-server tokens) | done, CI | `./mcp verify`: both servers pass; gmx token → 401 on garmin host and vice versa |
+| Full MCP session | done | `tools/list` → **153** tools; before login a tool call returns "Garmin login failed. Run 'garmin-mcp-auth'…" (no crash) |
+| Hardening | done, CI | `./mcp inspect`: `10001:10001`, read-only rootfs, caps ALL dropped, no-new-privileges, no ports |
+| Token volume | done | `/data` is `drwx------ 10001`, writable via `./mcp dc run`; `/etc` read-only |
+| trivy, CRITICAL gate | done, CI | passes after the h11 override (was CVE-2025-43859, reachable via uvicorn); remaining HIGHs documented in `servers/garmin/README.md` |
+| Garmin login (`garmin-mcp-auth`) and real data in claude.ai | pending: user | `servers/garmin/README.md` |
+
 ## On the VM (fill in)
 
 | Check | Result |

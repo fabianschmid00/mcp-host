@@ -1,0 +1,3 @@
+http://garmin-mcp.fabiserver.de:8080 {
+	import mcp_route {$GARMIN_UPSTREAM_TOKEN} garmin:8000
+}

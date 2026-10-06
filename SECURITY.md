@@ -6,6 +6,7 @@
 |---|---|---|
 | GMX app password | `/etc/mcp-host/gmx.env`, env of the `gmx` container | Full IMAP **and SMTP** access to the mailbox (GMX app passwords cannot be scoped) |
 | Mailbox content | GMX; transiently in `gmx` RAM (metadata index on tmpfs) and in Claude conversations | Privacy |
+| Garmin OAuth tokens | `garmin-data` Docker volume (`/data/tokens`), the `garmin` container | Full Garmin Connect account access for ~6 months |
 | Upstream tokens | `/etc/mcp-host/gateway.env`, the portal's server entries | Direct access to that MCP server, bypassing the portal's login |
 | Tunnel token | `/etc/mcp-host/tunnel.env` | Someone else can serve traffic for the tunnel's hostnames |
 
@@ -53,6 +54,10 @@ attachment allow-root. Even then keep `send_email` on **Ask** and check
   section) adds an edge-enforced layer if you want one.
 - **Egress is not port-filtered by default.** `gmx` can reach any internet
   host from its own `gmx-egress` network. Optional filtering is described below.
+- **Garmin: all tools exposed**, including deletes (owner's choice). A
+  malicious instruction in Garmin data, or a mistake, could delete workouts,
+  courses, weigh-ins or food logs. Keep the tools listed in
+  `servers/garmin/tools.json` → `ask` on **Ask** in claude.ai.
 - **docker group = root.** Anyone in it can read every secret via `docker inspect`.
   The VM has one admin.
 
@@ -62,6 +67,7 @@ attachment allow-root. Even then keep `send_email` on **Ask** and check
 |---|---|---|
 | GMX app password | `gmx.env` (`MCP_EMAIL_SERVER_PASSWORD`) | your password manager (optional) |
 | Upstream token per server | `gateway.env` (`<NAME>_UPSTREAM_TOKEN`) | portal server entry (Custom headers) |
+| Garmin OAuth tokens | volume `mcp-host_garmin-data` | nowhere (re-create with the auth CLI) |
 | Tunnel token | `tunnel.env` (`TUNNEL_TOKEN`) | Cloudflare (retrievable from the dashboard) |
 
 Nothing secret is ever committed: `.gitignore` excludes `*.env`, CI and the
@@ -71,6 +77,7 @@ pre-commit hook run gitleaks.
 
 | Secret | Steps |
 |---|---|
+| Garmin OAuth tokens | `./mcp dc run --rm -it --entrypoint garmin-mcp-auth garmin --force-reauth` → `./mcp restart garmin` |
 | GMX app password | GMX → Anwendungsspezifische Passwörter → create a new one → put it in `gmx.env` → `./mcp up` (recreates `gmx`) → delete the old one in GMX |
 | Upstream token | `./mcp token gmx --rotate` → paste the printed JSON into the portal server's Custom headers → `./mcp restart gateway` → `./mcp verify gmx --public` (short outage between the two edits) |
 | Tunnel token | Tunnel → **Refresh token** (or delete + recreate the tunnel and its public hostnames) → `tunnel.env` → `./mcp up` |
@@ -81,6 +88,7 @@ Rotate everything once a year, and immediately if the VM or a backup may have le
 
 1. `./mcp down`.
 2. GMX: delete the `mcp-homelab` app password (this alone cuts all mail access).
+   Garmin: change the Garmin password (invalidates the stored OAuth tokens).
 3. Cloudflare: disable the portal's Access policy, or delete the tunnel.
 4. claude.ai: remove the connector.
 
@@ -115,10 +123,10 @@ above: tools that read local files or make outbound requests.
 
 ### Backups
 
-Only `/etc/mcp-host/` holds state (secrets). Everything else is in git or
-rebuildable (the gmx metadata index lives in RAM). A Proxmox backup job of
-the VM covers it; alternatively keep the three values in your password
-manager and rebuild from the runbook.
+State lives in `/etc/mcp-host/` (secrets) and the `garmin-data` volume
+(Garmin OAuth tokens; losing it only means re-running the Garmin login).
+Everything else is in git or rebuildable (the gmx metadata index lives in
+RAM). A Proxmox backup job of the VM covers both.
 
 ### Debugging a failing connector
 

@@ -1,0 +1,20 @@
+{
+  "server_id": "garmin",
+  "hostname": "garmin-mcp.fabiserver.de",
+  "comment": "All upstream tools are enabled (owner's choice). In claude.ai set the write/delete tools listed under ask to Ask.",
+  "allow": ["*"],
+  "ask": [
+    "delete_course",
+    "delete_custom_food",
+    "delete_food_log",
+    "delete_weigh_ins",
+    "delete_workout",
+    "delete_workouts",
+    "set_heart_rate_zones",
+    "set_nutrition_daily_settings",
+    "upload_course",
+    "download_activity_file",
+    "download_course_gpx",
+    "set_fit_download_dir"
+  ]
+}

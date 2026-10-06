@@ -213,7 +213,8 @@ cmd_add() {
 	[ ! -e "$dir" ] || die "$dir already exists"
 	[ -n "$image" ] || die "--image is required (pin it: repo:tag@sha256:…)"
 	[[ $image =~ ^[A-Za-z0-9./:_@-]+$ ]] || die "invalid image reference"
-	[[ $image == *@sha256:* ]] || warn "image is not pinned by digest; ./mcp check will flag it"
+	[[ $image == *@sha256:* || $image == mcp-host/* ]] ||
+		warn "image is not pinned by digest; ./mcp check will flag it (locally built images: name them mcp-host/<name>:local)"
 	[[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "--port must be 1-65535"
 	host=${host:-$name-mcp.$MCP_DOMAIN}
 	[[ $host =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || die "invalid hostname: $host"
@@ -260,7 +261,7 @@ cmd_remove() {
 	server_exists "$name"
 	host=$(server_host "$name")
 	if [ "$yes" != --yes ]; then
-		read -r -p "Remove server '$name' ($host), its token and $MCP_SECRETS_DIR/$name.env? [y/N] " ans
+		read -r -p "Remove server '$name' ($host), its token, $MCP_SECRETS_DIR/$name.env and its data volumes? [y/N] " ans
 		[[ $ans =~ ^[yY]$ ]] || die "aborted"
 	fi
 	project=$(compose config --format json 2>/dev/null | sed -nE 's/^[[:space:]]*"name":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)
@@ -277,6 +278,9 @@ cmd_remove() {
 		compose up -d --no-deps --force-recreate gateway >/dev/null
 	fi
 	docker network rm "${project}_$name-backend" "${project}_$name-egress" >/dev/null 2>&1 || true
+	# Named volumes of this server (e.g. garmin-data with OAuth tokens).
+	docker volume ls -q --filter "label=com.docker.compose.project=$project" | grep "^${project}_$name-" |
+		xargs -r docker volume rm >/dev/null 2>&1 || true
 
 	cat <<EOF
 
@@ -310,7 +314,10 @@ cmd_check() {
 	while read -r img; do
 		[[ $img == *@sha256:* ]] || { warn "image not pinned by digest: $img"; rc=1; }
 	done < <(grep -hE '^[[:space:]]+image:' compose.yaml servers/*/compose.yaml | awk '{print $2}' | grep -v '^mcp-host/')
-	grep -q '@sha256:' gateway/Dockerfile || { warn "gateway base image not pinned"; rc=1; }
+	while read -r img; do
+		warn "Dockerfile base image not pinned by digest: $img"
+		rc=1
+	done < <(dockerfiles | xargs sed -nE 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/p' | grep -v '@sha256:' | grep -vx scratch)
 	if grep -rlE 'docker\.sock' compose.yaml servers/ >/dev/null 2>&1; then warn "docker.sock referenced"; rc=1; fi
 	if grep -hE '^[[:space:]]+ports:' compose.yaml servers/*/compose.yaml >/dev/null 2>&1; then warn "published ports found"; rc=1; fi
 	compose config -q || rc=1
@@ -429,11 +436,20 @@ cmd_inspect() {
 	[ "$rc" -eq 0 ] && info "all containers hardened" || die "inspect found problems"
 }
 
+dockerfiles() { ls gateway/Dockerfile servers/*/Dockerfile 2>/dev/null; }
+
 pinned_images() {
 	{
 		grep -hE '^[[:space:]]+image:' compose.yaml servers/*/compose.yaml | awk '{print $2}'
-		sed -nE 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/p' gateway/Dockerfile
+		dockerfiles | xargs sed -nE 's/^FROM[[:space:]]+([^[:space:]]+).*/\1/p'
 	} | grep '@sha256:' | sort -u
+}
+
+# Locally built images (mcp-host/*) that exist; scanned from a saved tarball.
+local_images() {
+	grep -hE '^[[:space:]]+image:[[:space:]]+mcp-host/' compose.yaml servers/*/compose.yaml | awk '{print $2}' |
+		sort -u | while read -r img; do docker image inspect "$img" >/dev/null 2>&1 && echo "$img"; done
+	return 0
 }
 
 cmd_update() {
@@ -465,20 +481,40 @@ run_trivy() {
 
 # Reports HIGH+CRITICAL; fails only on CRITICAL with a fix available that is not
 # accepted (with reason and expiry) in .trivyignore.yaml.
+# Pinned images are fetched by trivy; locally built images (mcp-host/*) are
+# scanned from a saved tarball in .scan/ (no Docker socket for trivy).
+scan_one() { # label, then trivy target args
+	local label=$1 code=0
+	shift
+	info "trivy: $label"
+	run_trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml "$@" || SCAN_RC=1
+	run_trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml \
+		--exit-code 2 --format json "$@" >/dev/null || code=$?
+	case $code in
+	0) ;;
+	2) warn "fixable CRITICAL vulnerabilities in $label"; SCAN_RC=1 ;;
+	*) warn "trivy failed for $label (exit $code)"; SCAN_RC=1 ;;
+	esac
+}
+
 cmd_scan() {
-	local img rc=0
+	local img tar
+	SCAN_RC=0
 	for img in $(pinned_images); do
-		info "trivy: $img"
-		run_trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml "$img" || rc=1
-		local code=0
-		run_trivy image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --exit-code 2 --format json "$img" >/dev/null || code=$?
-		case $code in
-		0) ;;
-		2) warn "fixable CRITICAL vulnerabilities in $img"; rc=1 ;;
-		*) warn "trivy failed for $img (exit $code)"; rc=1 ;;
-		esac
+		scan_one "$img" "$img"
 	done
-	[ "$rc" -eq 0 ] && info "scan passed (no fixable CRITICAL)" || die "scan failed"
+	mkdir -p .scan
+	for img in $(local_images); do
+		tar=".scan/$(printf '%s' "$img" | tr '/:' '__').tar"
+		docker save -o "$tar" "$img"
+		# trivy runs as root without capabilities, so it cannot read another
+		# user's 0600 file. Image layers only, nothing secret.
+		chmod 644 "$tar"
+		scan_one "$img (local build)" --input "$tar"
+		rm -f "$tar"
+	done
+	rmdir .scan 2>/dev/null || true
+	[ "$SCAN_RC" -eq 0 ] && info "scan passed (no fixable CRITICAL)" || die "scan failed"
 }
 
 cmd=${1:-help}
