@@ -1,0 +1,62 @@
+# Second Garmin Connect account (Alina), same image as servers/garmin.
+# Both services build the same image from servers/garmin; the second build is
+# fully cached. Login once (Alina types her own password):
+#   ./mcp dc run --rm -it --entrypoint garmin-mcp-auth garmin-alina
+# Details, risks and token handling: servers/garmin/README.md.
+services:
+  gateway:
+    networks: [garmin-alina-backend]
+
+  garmin-alina:
+    build: ./servers/garmin
+    image: mcp-host/garmin:local
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    env_file:
+      - path: ${MCP_SECRETS_DIR:-/etc/mcp-host}/garmin-alina.env
+        required: true
+    environment:
+      GARMIN_MCP_TRANSPORT: streamable-http
+      GARMIN_MCP_HOST: 0.0.0.0
+      GARMIN_MCP_PORT: "8000"
+      GARMINTOKENS: /data/tokens
+      GARMINTOKENS_BASE64: /data/tokens_base64
+      # Downloads and their config go to tmpfs; nothing else is writable.
+      HOME: /tmp
+      GARMIN_FIT_DOWNLOAD_DIR: /tmp/downloads
+      GARMIN_FIT_CONFIG: /tmp/fit_config.json
+    volumes:
+      - garmin-alina-data:/data
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    networks: [garmin-alina-backend, garmin-alina-egress]
+    cpus: 1.0
+    mem_limit: 384m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # OAuth tokens (about 6 months valid). Back this up or re-run the auth step.
+  garmin-alina-data: {}
+
+networks:
+  # gateway <-> garmin-alina. No egress.
+  garmin-alina-backend:
+    internal: true
+  # garmin-alina -> Garmin Connect (HTTPS). Only garmin-alina joins it.
+  garmin-alina-egress:
+    driver_opts:
+      com.docker.network.bridge.name: mcp-alina-egr
