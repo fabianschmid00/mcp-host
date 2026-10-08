@@ -134,6 +134,16 @@ if PyJWT ≥ 2.14.0 and anyio ≥ 4.14.2 are in, delete both entries from
 | trivy, CRITICAL gate | done, CI | passes after the h11 override (was CVE-2025-43859, reachable via uvicorn); remaining HIGHs documented in `servers/garmin/README.md` |
 | Garmin login (`garmin-mcp-auth`) and real data in claude.ai | pending: user | `servers/garmin/README.md` |
 
+## garmin-alina (second Garmin account, 2026-10-08, local)
+
+| Check | Status | Evidence |
+|---|---|---|
+| Gateway checks incl. cross-server tokens | done, CI | `./mcp verify`: all 3 servers pass; Alina's token → 401 on `garmin` and `gmx`, and theirs → 401 on `garmin-alina` |
+| Isolation | done | own volume `garmin-alina-data` → `/data`; own networks `garmin-alina-backend` (internal) + `garmin-alina-egress` |
+| Hardening | done, CI | `./mcp inspect`: 10001, read-only, caps dropped, no-new-privileges, no ports |
+| `./mcp remove garmin` keeps her tokens | done | after removal only `mcp-host_garmin-alina-data` remained (prefix-match bug fixed) |
+| Her login + data in claude.ai | pending: user | `servers/garmin-alina/README.md` |
+
 ## On the VM (fill in)
 
 | Check | Result |

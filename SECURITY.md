@@ -7,6 +7,7 @@
 | GMX app password | `/etc/mcp-host/gmx.env`, env of the `gmx` container | Full IMAP **and SMTP** access to the mailbox (GMX app passwords cannot be scoped) |
 | Mailbox content | GMX; transiently in `gmx` RAM (metadata index on tmpfs) and in Claude conversations | Privacy |
 | Garmin OAuth tokens | `garmin-data` Docker volume (`/data/tokens`), the `garmin` container | Full Garmin Connect account access for ~6 months |
+| Alina's Garmin OAuth tokens | `garmin-alina-data` volume, the `garmin-alina` container | Full access to **her** Garmin account (incl. health data) for ~6 months |
 | Upstream tokens | `/etc/mcp-host/gateway.env`, the portal's server entries | Direct access to that MCP server, bypassing the portal's login |
 | Tunnel token | `/etc/mcp-host/tunnel.env` | Someone else can serve traffic for the tunnel's hostnames |
 
@@ -68,6 +69,7 @@ attachment allow-root. Even then keep `send_email` on **Ask** and check
 | GMX app password | `gmx.env` (`MCP_EMAIL_SERVER_PASSWORD`) | your password manager (optional) |
 | Upstream token per server | `gateway.env` (`<NAME>_UPSTREAM_TOKEN`) | portal server entry (Custom headers) |
 | Garmin OAuth tokens | volume `mcp-host_garmin-data` | nowhere (re-create with the auth CLI) |
+| Alina's Garmin OAuth tokens | volume `mcp-host_garmin-alina-data` | nowhere (she re-runs the auth CLI) |
 | Tunnel token | `tunnel.env` (`TUNNEL_TOKEN`) | Cloudflare (retrievable from the dashboard) |
 
 Nothing secret is ever committed: `.gitignore` excludes `*.env`, CI and the
