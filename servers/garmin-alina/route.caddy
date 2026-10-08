@@ -1,0 +1,3 @@
+http://garmin-alina-mcp.fabiserver.de:8080 {
+	import mcp_route {$GARMIN_ALINA_UPSTREAM_TOKEN} garmin-alina:8000
+}

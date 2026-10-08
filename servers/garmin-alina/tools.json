@@ -1,0 +1,22 @@
+{
+  "server_id": "garmin-alina",
+  "hostname": "garmin-alina-mcp.fabiserver.de",
+  "comment": "Alina's account. All upstream tools are enabled (owner's choice, with Alina's consent). In claude.ai set the tools listed under ask to Ask.",
+  "allow": [
+    "*"
+  ],
+  "ask": [
+    "delete_course",
+    "delete_custom_food",
+    "delete_food_log",
+    "delete_weigh_ins",
+    "delete_workout",
+    "delete_workouts",
+    "set_heart_rate_zones",
+    "set_nutrition_daily_settings",
+    "upload_course",
+    "download_activity_file",
+    "download_course_gpx",
+    "set_fit_download_dir"
+  ]
+}

@@ -256,7 +256,7 @@ cmd_add() {
 }
 
 cmd_remove() {
-	local name=${1:-} yes=${2:-} host project
+	local name=${1:-} yes=${2:-} host project vols
 	[ -n "$name" ] || die "usage: ./mcp remove <name> [--yes]"
 	server_exists "$name"
 	host=$(server_host "$name")
@@ -266,6 +266,10 @@ cmd_remove() {
 	fi
 	project=$(compose config --format json 2>/dev/null | sed -nE 's/^[[:space:]]*"name":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)
 	project=${project:-mcp-host}
+
+	# Exactly the volumes this server declares (not a name prefix: removing
+	# "garmin" must not touch "garmin-alina-data").
+	vols=$(docker compose -f compose.yaml -f "servers/$name/compose.yaml" config --volumes 2>/dev/null || true)
 
 	info "stopping and removing container $name"
 	compose rm --stop --force "$name" >/dev/null 2>&1 || true
@@ -278,9 +282,9 @@ cmd_remove() {
 		compose up -d --no-deps --force-recreate gateway >/dev/null
 	fi
 	docker network rm "${project}_$name-backend" "${project}_$name-egress" >/dev/null 2>&1 || true
-	# Named volumes of this server (e.g. garmin-data with OAuth tokens).
-	docker volume ls -q --filter "label=com.docker.compose.project=$project" | grep "^${project}_$name-" |
-		xargs -r docker volume rm >/dev/null 2>&1 || true
+	for v in $vols; do
+		docker volume rm "${project}_$v" >/dev/null 2>&1 || true
+	done
 
 	cat <<EOF
 
